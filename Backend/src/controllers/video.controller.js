@@ -9,6 +9,26 @@ import {
   uploadOnCloudinary,
 } from "../utils/cloudinary.js";
 import { response } from "express";
+import axios from "axios";
+
+/**
+ * Function to generate Cloudinary frame URLs
+ * @param {string} videoUrl - Cloudinary video URL
+ * @returns {array} - Array of frame URLs
+ */
+const generateFrameUrls = (videoUrl) => {
+  const baseUrl = videoUrl.split("/upload/")[0]; // Extract base Cloudinary URL
+  const publicId = videoUrl.split("/upload/")[1].split(".mp4")[0]; // Extract video ID (remove .mp4)
+
+  return [
+    `${baseUrl}/upload/so_10/${publicId}.jpg`,  // Frame at 10s
+    `${baseUrl}/upload/so_30/${publicId}.jpg`,  // Frame at 30s
+    `${baseUrl}/upload/so_60/${publicId}.jpg`,  // Frame at 60s
+  ];
+};
+
+
+
 
 const getAllVideos = asyncHandler(async (req, res) => {
   const {
@@ -66,41 +86,77 @@ const getAllVideos = asyncHandler(async (req, res) => {
 
 const publishAVideo = asyncHandler(async (req, res) => {
   const { title, description } = req.body;
-  // TODO: get video, upload to cloudinary, create video
+
+  // Ensure all required fields are present
   if ([title, description].some((field) => field?.trim() === "")) {
     throw new ApiError(400, "All Fields are required");
   }
+
+  // Get video and thumbnail file paths from request
   const videoLocalPath = req.files?.videoFile[0]?.path;
-  const thumbnail = req.files?.thumbnail[0].path;
+  const thumbnailLocalPath = req.files?.thumbnail[0]?.path;
+
   if (!videoLocalPath) {
     throw new ApiError(400, "Video is required");
   }
-  if (!thumbnail) {
+  if (!thumbnailLocalPath) {
     throw new ApiError(400, "Thumbnail is required");
   }
+
+  // ✅ Upload video & thumbnail to Cloudinary
   const videoResponse = await uploadOnCloudinary(videoLocalPath);
-  const thumbnailResponse = await uploadOnCloudinary(thumbnail);
+  const thumbnailResponse = await uploadOnCloudinary(thumbnailLocalPath);
+
   if (!videoResponse?.url) {
     throw new ApiError(400, "Error while uploading video");
   }
   if (!thumbnailResponse?.url) {
     throw new ApiError(400, "Error while uploading thumbnail");
   }
-  const videoDuration = videoResponse?.duration;
+
+  // ✅ Generate Key Frames for AI Analysis
+  const frameUrls = generateFrameUrls(videoResponse.url);
+  if (!frameUrls || frameUrls.length === 0) {
+    console.error("❌ Error: No frame URLs found!");
+  } else {
+    console.log("✅ Sending Frames to AI:", frameUrls);
+  }
+  
+
+  // ✅ Call AI API to Generate Title & Description
+  let aiGeneratedTitle = title;
+  let aiGeneratedDescription = description;
+
+  try {
+    const aiResponse = await axios.post(
+      "http://localhost:8000/api/v1/videos/generate-metadata",
+      { frameUrls },
+      {
+        params: { key: process.env.GEMINI_API_KEY }, // ✅ Correct way to send API key
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  
+    aiGeneratedTitle = aiResponse.data.title || title;
+    aiGeneratedDescription = aiResponse.data.description || description;
+  } catch (error) {
+    console.error("❌ AI Metadata Generation Error:", error.response?.data || error.message);
+  }
+
+  // ✅ Save video details in database
   const video = await Video.create({
-    title,
-    description,
+    title: aiGeneratedTitle,
+    description: aiGeneratedDescription,
     videoFile: videoResponse.url,
     thumbnail: thumbnailResponse.url,
-    duration: videoDuration,
+    duration: videoResponse?.duration || 0,
     owner: req.user?._id,
   });
+
   return res.status(201).json(
-    //201 is for resource creation (like a new video).
-    new ApiResponse(201, video, "Video Uploaded Successfully")
+    new ApiResponse(201, video, "Video Uploaded Successfully with AI Metadata")
   );
 });
-
 const getVideoById = asyncHandler(async (req, res) => {
   const { videoId } = req.params;
   //TODO: get video by id

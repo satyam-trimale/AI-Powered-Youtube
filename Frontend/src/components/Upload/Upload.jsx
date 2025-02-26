@@ -35,38 +35,43 @@ export default function VideoUpload() {
   };
 
   const handleUpload = async () => {
-    if (!video || !title || !description || !thumbnail) {
-      setMessage("Please fill all required fields before uploading.");
+    if (!video || !thumbnail) {
+      setMessage("Please select a video and a thumbnail.");
       return;
     }
-
+  
     setIsUploading(true);
+    setUploadProgress(0);
     const formData = new FormData();
     formData.append("title", title);
     formData.append("description", description);
     formData.append("videoFile", video);
     formData.append("thumbnail", thumbnail);
-
+  
     try {
       const response = await axios.post("http://localhost:8000/api/v1/videos", formData, {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("accessToken")}`, // ✅ Use stored token
-        },
+        headers: { Authorization: `Bearer ${localStorage.getItem("accessToken")}` },
         onUploadProgress: (progressEvent) => {
           const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
           setUploadProgress(percentCompleted);
         },
       });
-
-      console.log("Upload Success:", response.data);
+  
+      console.log("✅ Upload Success:", response.data);
+  
+      // ✅ Update fields with AI-generated data from backend
+      setTitle(response.data.data.title);
+      setDescription(response.data.data.description);
+  
       setMessage(`Video uploaded successfully!`);
     } catch (error) {
-      console.error("Upload Failed:", error.response?.data || error.message);
+      console.error("❌ Upload Failed:", error.response?.data || error.message);
       setMessage("Upload failed. Please try again.");
     } finally {
       setIsUploading(false);
     }
   };
+  
 
   return (
     <div className="bg-gray-50 min-h-screen p-6">
