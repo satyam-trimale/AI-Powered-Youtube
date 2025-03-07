@@ -10,6 +10,8 @@ import {
 } from "../utils/cloudinary.js";
 import { response } from "express";
 import axios from "axios";
+import { v2 as cloudinary } from 'cloudinary';
+
 
 /**
  * Function to generate Cloudinary frame URLs
@@ -21,14 +23,17 @@ const generateFrameUrls = (videoUrl) => {
   const publicId = videoUrl.split("/upload/")[1].split(".mp4")[0]; // Extract video ID (remove .mp4)
 
   return [
-    `${baseUrl}/upload/so_10/${publicId}.jpg`,  // Frame at 10s
-    `${baseUrl}/upload/so_30/${publicId}.jpg`,  // Frame at 30s
-    `${baseUrl}/upload/so_60/${publicId}.jpg`,  // Frame at 60s
+    `${baseUrl}/upload/so_10/${publicId}.jpg`, // Frame at 10s
+    `${baseUrl}/upload/so_30/${publicId}.jpg`, // Frame at 30s
+    `${baseUrl}/upload/so_60/${publicId}.jpg`, // Frame at 60s
   ];
 };
+// const generateThumbnailFrameUrl = (videoUrl) => {
+//   const baseUrl = videoUrl.split("/upload/")[0]; // Extract base Cloudinary URL
+//   const publicId = videoUrl.split("/upload/")[1].split(".mp4")[0]; // Extract video ID (remove .mp4)
 
-
-
+//   return `${baseUrl}/image/upload/so_10/${publicId}.jpg`; // ✅ Return a single string
+// };
 
 const getAllVideos = asyncHandler(async (req, res) => {
   const {
@@ -87,75 +92,103 @@ const getAllVideos = asyncHandler(async (req, res) => {
 const publishAVideo = asyncHandler(async (req, res) => {
   const { title, description } = req.body;
 
-  // Ensure all required fields are present
   if ([title, description].some((field) => field?.trim() === "")) {
     throw new ApiError(400, "All Fields are required");
   }
 
-  // Get video and thumbnail file paths from request
   const videoLocalPath = req.files?.videoFile[0]?.path;
-  const thumbnailLocalPath = req.files?.thumbnail[0]?.path;
+  const thumbnailLocalPath = req.files?.thumbnail?.[0]?.path;
 
   if (!videoLocalPath) {
     throw new ApiError(400, "Video is required");
   }
-  if (!thumbnailLocalPath) {
-    throw new ApiError(400, "Thumbnail is required");
-  }
 
-  // ✅ Upload video & thumbnail to Cloudinary
+  // ✅ Upload Video
   const videoResponse = await uploadOnCloudinary(videoLocalPath);
-  const thumbnailResponse = await uploadOnCloudinary(thumbnailLocalPath);
-
   if (!videoResponse?.url) {
     throw new ApiError(400, "Error while uploading video");
   }
-  if (!thumbnailResponse?.url) {
-    throw new ApiError(400, "Error while uploading thumbnail");
-  }
 
-  // ✅ Generate Key Frames for AI Analysis
+  // ✅ Generate Key Frames
   const frameUrls = generateFrameUrls(videoResponse.url);
-  if (!frameUrls || frameUrls.length === 0) {
-    console.error("❌ Error: No frame URLs found!");
-  } else {
-    console.log("✅ Sending Frames to AI:", frameUrls);
-  }
-  
+  if (!frameUrls.length) console.error("❌ No frame URLs found!");
 
-  // ✅ Call AI API to Generate Title & Description
+  // ✅ Generate AI Metadata
   let aiGeneratedTitle = title;
   let aiGeneratedDescription = description;
 
-  try {
-    const aiResponse = await axios.post(
-      "http://localhost:8000/api/v1/videos/generate-metadata",
-      { frameUrls },
-      {
-        params: { key: process.env.GEMINI_API_KEY }, // ✅ Correct way to send API key
-        headers: { "Content-Type": "application/json" },
-      }
-    );
-  
-    aiGeneratedTitle = aiResponse.data.title || title;
-    aiGeneratedDescription = aiResponse.data.description || description;
-  } catch (error) {
-    console.error("❌ AI Metadata Generation Error:", error.response?.data || error.message);
+    try {
+      const aiResponse = await axios.post(
+        "http://localhost:8000/api/v1/videos/generate-metadata",
+        { frameUrls },
+        {
+          params: { key: process.env.GEMINI_API_KEY },
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+
+      aiGeneratedTitle = aiResponse.data.title || title;
+      aiGeneratedDescription = aiResponse.data.description || description;
+    } catch (error) {
+      console.error("❌ AI Metadata Error:", error.response?.data || error.message);
+    }
+
+  // ✅ Handle Thumbnail
+  let thumbnailUrl;
+
+  if (!thumbnailLocalPath) {
+    const ThumbnailFrameUrl = generateFrameUrls(videoResponse.url);
+    if (!ThumbnailFrameUrl || ThumbnailFrameUrl.length === 0) {
+      console.error("❌ No frame URL for thumbnail!");
+    } else {
+      console.log("✅ Using Thumbnail Source:", ThumbnailFrameUrl[0]);
+    }
+    
+    try {
+      let sourceImageUrl = ThumbnailFrameUrl[0]; // ✅ First frame as thumbnail
+    
+      // ✅ Upload frame to Cloudinary
+      const thumbnailId = `video_thumbnail_${Date.now()}`;
+      const uploadResult = await cloudinary.uploader.upload(sourceImageUrl, {
+        public_id: thumbnailId,
+      });
+    
+      console.log("✅ Uploaded Image:", uploadResult.secure_url);
+    
+      
+      // ✅ Generate transformed URL
+      thumbnailUrl = cloudinary.url(thumbnailId, {
+        transformation: [
+          { gravity: "auto", height: 720, width: 1280, crop: "fill" },
+          { overlay: { font_family: "Arial", font_size: 70, text: aiGeneratedTitle.split(" ").slice(0, 3).join(" ") }, color: "white" }, // Get first three words of title
+          { flags: "layer_apply", gravity: "center" }
+        ],
+      });
+    
+      console.log("✅ Transformed Thumbnail URL:", thumbnailUrl);
+    } catch (error) {
+      console.error("❌ Error generating thumbnail:", error.message);
+    }
+  } else {
+    // ✅ Upload provided thumbnail
+    const thumbnailResponse = await uploadOnCloudinary(thumbnailLocalPath);
+    if (!thumbnailResponse?.url) {
+      throw new ApiError(400, "Error while uploading thumbnail");
+    }
+    thumbnailUrl = thumbnailResponse.url;
   }
 
-  // ✅ Save video details in database
+  // ✅ Save in DB
   const video = await Video.create({
     title: aiGeneratedTitle,
     description: aiGeneratedDescription,
     videoFile: videoResponse.url,
-    thumbnail: thumbnailResponse.url,
+    thumbnail: thumbnailUrl,
     duration: videoResponse?.duration || 0,
     owner: req.user?._id,
   });
 
-  return res.status(201).json(
-    new ApiResponse(201, video, "Video Uploaded Successfully with AI Metadata")
-  );
+  return res.status(201).json(new ApiResponse(201, video, "Video Uploaded Successfully with AI Metadata"));
 });
 const getVideoById = asyncHandler(async (req, res) => {
   const { videoId } = req.params;
@@ -271,11 +304,16 @@ const togglePublishStatus = asyncHandler(async (req, res) => {
   video.isPublished = !video.isPublished;
   await video.save(); // ✅ Corrected save()
 
-  return res.status(200).json(
-    new ApiResponse(200, video, `Video ${video.isPublished ? "published" : "unpublished"} successfully`)
-  );
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(
+        200,
+        video,
+        `Video ${video.isPublished ? "published" : "unpublished"} successfully`
+      )
+    );
 });
-
 
 export {
   getAllVideos,
